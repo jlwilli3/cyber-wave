@@ -159,6 +159,15 @@
     const enemyBullets = [];
     const particles = [];
     const floaters = [];
+    const powerUps = [];
+
+    const POWER_KINDS = {
+      W: { letter: "W", color: MAGENTA, shape: "tri", duration: 7 },
+      S: { letter: "S", color: LIME, shape: "circle", duration: 0 },
+      O: { letter: "O", color: YELLOW, shape: "square", duration: 5 },
+    };
+
+    const power = { wide: 0, overclock: 0, shield: false };
 
     const player = {
       x: VW / 2,
@@ -403,6 +412,10 @@
       enemyBullets.length = 0;
       particles.length = 0;
       floaters.length = 0;
+      powerUps.length = 0;
+      power.wide = 0;
+      power.overclock = 0;
+      power.shield = false;
       spawnWave();
       mode = "play";
       sweep = 1;
@@ -462,6 +475,63 @@
       floaters.push({ x, y, text, color, life: 0.55, max: 0.55 });
     }
 
+    function createPowerUp(x, y) {
+      const keys = ["W", "S", "O"];
+      const kind = keys[(Math.random() * keys.length) | 0];
+      const spec = POWER_KINDS[kind];
+      return {
+        x,
+        y,
+        kind,
+        letter: spec.letter,
+        color: spec.color,
+        shape: spec.shape,
+        spin: rand(0, Math.PI * 2),
+        r: 11,
+        vy: 48,
+      };
+    }
+
+    function grantPower(token) {
+      if (token.kind === "W") power.wide = POWER_KINDS.W.duration;
+      else if (token.kind === "O") {
+        power.overclock = POWER_KINDS.O.duration;
+        player.fireLock = Math.min(player.fireLock, FIRE_INTERVAL / 3);
+      } else power.shield = true;
+      popup(token.x, token.y - 14, token.letter, token.color);
+      tone(token.kind === "O" ? 880 : 660, 0.07, "square", 0.03, 1200);
+    }
+
+    function tokenHitsShip(token) {
+      const ship = { left: player.x - 16, right: player.x + 16, top: player.y - 18, bottom: player.y + 16 };
+      const box = {
+        left: token.x - token.r,
+        right: token.x + token.r,
+        top: token.y - token.r,
+        bottom: token.y + token.r,
+      };
+      return ship.left < box.right && ship.right > box.left && ship.top < box.bottom && ship.bottom > box.top;
+    }
+
+    function updatePowerUps(dt) {
+      if (power.wide > 0) power.wide = Math.max(0, power.wide - dt);
+      if (power.overclock > 0) power.overclock = Math.max(0, power.overclock - dt);
+      const canCollect = mode === "play" || mode === "clear";
+      for (let i = powerUps.length - 1; i >= 0; i--) {
+        const token = powerUps[i];
+        token.y += token.vy * dt;
+        token.spin += dt * 2.2;
+        if (token.y > VH + 24) {
+          powerUps.splice(i, 1);
+          continue;
+        }
+        if (!canCollect || !tokenHitsShip(token)) continue;
+        grantPower(token);
+        explode(token.x, token.y, token.color, 8);
+        powerUps.splice(i, 1);
+      }
+    }
+
     function killEnemy(index) {
       const enemy = enemies[index];
       const diving = enemy.state !== "grid";
@@ -469,6 +539,7 @@
       score += gained;
       popup(enemy.x, enemy.y - 14, "+" + gained, diving ? YELLOW : enemy.baseColor);
       explode(enemy.x, enemy.y, diving ? YELLOW : enemy.baseColor, diving ? 14 : 11);
+      if (enemy.state === "dive" && Math.random() < 0.3) powerUps.push(createPowerUp(enemy.x, enemy.y));
       enemies.splice(index, 1);
       tone(diving ? 240 : 180, 0.07, "square", 0.035, 70);
       if (mode === "play" && enemies.length === 0) beginClear();
@@ -476,6 +547,13 @@
 
     function hurt() {
       if (mode !== "play" || player.invuln > 0) return;
+      if (power.shield) {
+        power.shield = false;
+        explode(player.x, player.y, LIME, 12);
+        player.invuln = 0.4;
+        tone(520, 0.08, "square", 0.035, 180);
+        return;
+      }
       player.lives -= 1;
       shake = 6;
       if (player.lives <= 0) {
@@ -559,8 +637,13 @@
       if (player.fireLock > 0) player.fireLock -= dt;
       const want = keys.has("Space") || pointerDown;
       if (!want || player.fireLock > 0) return;
-      playerBullets.push({ x: player.x, y: player.y - 20, vy: -900 });
-      player.fireLock = FIRE_INTERVAL;
+      if (power.wide > 0) {
+        playerBullets.push({ x: player.x - 12, y: player.y - 16, vy: -900, wide: true });
+        playerBullets.push({ x: player.x + 12, y: player.y - 16, vy: -900, wide: true });
+      } else {
+        playerBullets.push({ x: player.x, y: player.y - 20, vy: -900, wide: false });
+      }
+      player.fireLock = power.overclock > 0 ? FIRE_INTERVAL / 3 : FIRE_INTERVAL;
       tone(820 + Math.random() * 90, 0.04, "square", 0.025, 280);
     }
 
@@ -819,6 +902,7 @@
       updateFloaters(dt);
       if (mode === "play") updatePlay(dt);
       else if (mode === "clear") updateClear(dt);
+      if (mode !== "title") updatePowerUps(dt);
     }
 
     function traceShape(kind, radius) {
@@ -921,6 +1005,17 @@
       ctx.translate(player.x, player.y);
       if (showCore) drawShipBody();
       else drawBrackets();
+      if (power.shield) {
+        ctx.strokeStyle = LIME;
+        ctx.shadowColor = LIME;
+        ctx.shadowBlur = 10;
+        ctx.globalAlpha = 0.95;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(0, -2, 26, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
       ctx.restore();
     }
 
@@ -1002,13 +1097,50 @@
       ctx.restore();
     }
 
+    function drawPowerShape(shape, radius) {
+      ctx.beginPath();
+      if (shape === "tri") {
+        ctx.moveTo(0, -radius);
+        ctx.lineTo(radius * 0.9, radius * 0.72);
+        ctx.lineTo(-radius * 0.9, radius * 0.72);
+        ctx.closePath();
+      } else if (shape === "circle") {
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      } else {
+        ctx.rect(-radius, -radius, radius * 2, radius * 2);
+      }
+    }
+
+    function drawPowerUps() {
+      for (let i = 0; i < powerUps.length; i++) {
+        const token = powerUps[i];
+        ctx.save();
+        ctx.translate(token.x, token.y);
+        ctx.strokeStyle = token.color;
+        ctx.shadowColor = token.color;
+        ctx.shadowBlur = 10;
+        ctx.lineWidth = 1.5;
+        ctx.rotate(token.spin);
+        drawPowerShape(token.shape, token.r);
+        ctx.stroke();
+        ctx.rotate(-token.spin);
+        ctx.font = "11px " + MONO;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = token.color;
+        ctx.fillText(token.letter, 0, 1);
+        ctx.restore();
+      }
+    }
+
     function drawPlayerBullets() {
       ctx.save();
-      ctx.shadowColor = CYAN;
       ctx.shadowBlur = 10;
       for (let i = 0; i < playerBullets.length; i++) {
         const bullet = playerBullets[i];
-        ctx.fillStyle = CYAN;
+        const color = bullet.wide ? MAGENTA : CYAN;
+        ctx.shadowColor = color;
+        ctx.fillStyle = color;
         ctx.fillRect(bullet.x - 1.5, bullet.y - 8, 3, 16);
         ctx.fillStyle = WHITE;
         ctx.fillRect(bullet.x - 0.5, bullet.y - 6, 1, 10);
@@ -1139,7 +1271,32 @@
       ctx.moveTo(22, 46);
       ctx.lineTo(VW - 22, 46);
       ctx.stroke();
+      drawPowerTimers();
       ctx.restore();
+    }
+
+    function drawPowerTimers() {
+      const active = [];
+      if (power.wide > 0) active.push({ label: "W", time: power.wide, max: POWER_KINDS.W.duration, color: MAGENTA });
+      if (power.overclock > 0) active.push({ label: "O", time: power.overclock, max: POWER_KINDS.O.duration, color: YELLOW });
+      ctx.font = "11px " + MONO;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.letterSpacing = "0.12em";
+      for (let i = 0; i < active.length; i++) {
+        const item = active[i];
+        const x = 22 + i * 78;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = item.color;
+        ctx.fillStyle = item.color;
+        ctx.fillText(item.label + " " + item.time.toFixed(1), x, 60);
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 0.35;
+        ctx.fillRect(x, 70, 52, 2);
+        ctx.globalAlpha = 1;
+        ctx.shadowBlur = 10;
+        ctx.fillRect(x, 70, 52 * clamp(item.time / item.max, 0, 1), 2);
+      }
     }
 
     function drawBanner() {
@@ -1273,6 +1430,7 @@
       if (mode === "play" || mode === "clear") {
         drawEnemyBullets();
         for (let i = 0; i < enemies.length; i++) drawEnemy(enemies[i]);
+        drawPowerUps();
         drawPlayerBullets();
         if (player.lives > 0) drawPlayer(true);
         drawParticles();
